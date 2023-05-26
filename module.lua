@@ -1,28 +1,65 @@
 local system = {}
 local cache = {}
 local handlerFunction = script:WaitForChild("CacheHandler")
+local events = {
+	onAdded = Instance.new("BindableEvent");
+	onRemoved = Instance.new("BindableEvent")
+}
+local runService = game:GetService("RunService")
+
+export type SavedCache = {
+	data: any|nil;
+	expire:number;
+	onClear:RBXScriptSignal;
+	Again:(key:string,value:any,expire:number)->(SavedCache);
+}
+
+export type ThreadObject = {
+	thread:thread;
+	Close: () -> ();
+	onClose: RBXScriptSignal;
+	onStart: RBXScriptSignal;
+}
+
+export type ClearedCacheObject = {
+	clearedCache: {};
+	onClear: RBXScriptSignal;
+}
+
+export type DefaultTable = {
+	key:string|number|nil;
+	value:string|number|boolean|{}|nil
+}
 
 function system:Get(key:string):{}?
 	return cache[key] or nil
 end
 
-function system:Set(key:string,value:any,expire:number):{}?
-	local events = {
+function system:Set(key:string,value:any,expire:number):SavedCache
+	local eventsM = {
 		onClear = Instance.new("BindableEvent")
 	}
 	cache[key] = value
+	events.onAdded:Fire({key=key,value=value})
 	task.delay(expire,function()
-		events.onClear:Fire(cache[key])
+		eventsM.onClear:Fire(cache[key])
 		cache[key] = nil
+		events.onRemoved:Fire({key=key,value=value})
 	end)
 	return {
 		data = cache[key];
 		expire = expire;
-		onClear = events.onClear.Event;
-	} or nil
+		onClear = eventsM.onClear.Event;
+		Again = function(key:string,value:any,expire:number):SavedCache
+			local em = system:Set(key,value,expire)
+			return em
+		end
+	}
 end
 
-if game:GetService("RunService"):IsServer() then
+local IsServer,IsClient = runService:IsServer(), runService:IsClient()
+
+if IsServer then
 	handlerFunction.OnServerInvoke = function(plr,key:string?)
 		if key then
 			return cache[key] or nil
@@ -32,7 +69,7 @@ if game:GetService("RunService"):IsServer() then
 	end
 end
 
-if game:GetService("RunService"):IsClient() then
+if IsClient then
 	handlerFunction.OnClientInvoke = function(key:string?)
 		if key then
 			return cache[key] or nil
@@ -100,7 +137,7 @@ function system:GetCacheInOrder(value:any,decending:boolean,limit:number,paramet
 		end
 	end)
 	local output = {}
-	if limit <= 200 then
+	if limit <= 1e3 then
 		local index = 0
 		for i,v in ipairs(list[value]) do
 			if index == limit then
@@ -111,12 +148,12 @@ function system:GetCacheInOrder(value:any,decending:boolean,limit:number,paramet
 		end
 		return output or {}
 	else
-		warn('[QuickCache]: Limit value must be lower or equals to 200!')
+		warn('[QuickCache]: Limit value must be lower or equals to 1,000!')
 		return {}
 	end
 end
 
-function system.thread(a:()->(),expire:number?)
+function system.thread(a:()->(),expire:number?) : ThreadObject
 	local startedAt = os.time()
 	local endevent = Instance.new("BindableEvent")
 	local startevent = Instance.new("BindableEvent")
@@ -135,8 +172,8 @@ function system.thread(a:()->(),expire:number?)
 		startedAt = os.time()
 	end)
 	return {
-		thread = threadC,
-		Close = function(self)
+		thread = threadC;
+		Close = function()
 			if threadC then
 				coroutine.close(threadC)
 				local endedAt = os.time()
@@ -148,14 +185,15 @@ function system.thread(a:()->(),expire:number?)
 			end
 		end;
 		onClose = endevent.Event;
-		onStart = startevent.Event
+		onStart = startevent.Event;
 	}
 end
 
-function system:ClearAllCache()
+function system:ClearAllCache() : ClearedCacheObject
 	local clearedCache = cache
 	local onClearEvent = Instance.new("BindableEvent")
 	cache = {}
+	events.onRemoved:Fire({value=clearedCache})
 	task.delay(task.wait(),function()
 		onClearEvent:Fire(clearedCache)
 	end)
@@ -165,5 +203,18 @@ function system:ClearAllCache()
 	}
 end
 
+function system:ClearAllCacheWithin(key:string)
+	if (cache[key] and typeof(cache[key]) == "table") then
+		local oldCache = cache[key]
+		cache[key] = {}
+		events.onRemoved:Fire({key=key; value=oldCache})
+	else
+		warn(`[QuickCache]: Key {key} not found.`)
+		return false
+	end
+end
+
+system.onCacheAdded = events.onAdded.Event
+system.onCacheRemoved = events.onRemoved.Event
 
 return system
